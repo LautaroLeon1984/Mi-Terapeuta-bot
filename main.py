@@ -25,14 +25,14 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot activo", 200
+    return "Bot activo desde Railway ✅", 200
 
 def keep_alive():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
 
 # --- Comandos ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hola 👋 Soy tu terapeuta IA. ¿En qué puedo ayudarte?")
+    await update.message.reply_text("Hola 👋 Soy tu terapeuta IA. Estoy funcionando desde Railway ✅")
 
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
@@ -53,7 +53,7 @@ if __name__ == "__main__":
 
     app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Eliminar webhook previo por seguridad
+    # Eliminar webhook previo para evitar conflictos con getUpdates
     async def setup():
         await app_bot.bot.delete_webhook(drop_pending_updates=True)
 
@@ -62,5 +62,5 @@ if __name__ == "__main__":
 
     app_bot.post_init = setup
 
-    print("🤖 Bot iniciado y esperando mensajes...")
+    print("🤖 Bot iniciado en Railway y esperando mensajes...")
     app_bot.run_polling()
