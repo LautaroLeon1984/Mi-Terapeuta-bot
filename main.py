@@ -1,141 +1,165 @@
-import os
 import logging
-import sqlite3
+import openai
+import os
+import json
+import time
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes,
-    filters, CallbackContext
-)
-from openai import OpenAI
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Configuración básica
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Colocar aquí tu user_id de Telegram
-openai = OpenAI(api_key=OPENAI_API_KEY)
+# --- Configuración ---
+openai.api_key = os.getenv("OPENAI_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = 818432829
+USUARIOS_DB = "usuarios.json"
 
-logging.basicConfig(level=logging.INFO)
+# --- Logging ---
+logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Inicializar base de datos
-conn = sqlite3.connect("bot_usuarios.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS usuarios (
-        user_id INTEGER PRIMARY KEY,
-        nombre TEXT,
-        fecha_inicio TEXT,
-        fecha_vencimiento TEXT
-    )
-''')
-conn.commit()
+# --- Cargar base de datos local ---
+def cargar_usuarios():
+    if os.path.exists(USUARIOS_DB):
+        with open(USUARIOS_DB, 'r') as f:
+            return json.load(f)
+    return {}
 
-# Verificar si el usuario tiene acceso activo
-def tiene_acceso(user_id: int) -> bool:
-    cursor.execute("SELECT fecha_vencimiento FROM usuarios WHERE user_id = ?", (user_id,))
-    fila = cursor.fetchone()
-    if not fila:
-        return True  # Permitimos hasta 5 mensajes antes del registro
+def guardar_usuarios(data):
+    with open(USUARIOS_DB, 'w') as f:
+        json.dump(data, f, indent=2)
+
+usuarios = cargar_usuarios()
+
+# --- Planes ---
+PLANES = {
+    "semanal": 7,
+    "quincenal": 15,
+    "mensual": 30,
+    "trimestral": 90,
+    "semestral": 180,
+    "anual": 365
+}
+
+URL_PLANES = [
+    ["Plan Semanal – $4.000", "https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b"],
+    ["Plan Quincenal – $7.000", "https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0"],
+    ["Plan Mensual – $12.000", "https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d"],
+    ["Plan Trimestral – $30.000", "https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e"],
+    ["Plan Semestral – $55.000", "https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437"],
+    ["Plan Anual – $99.000", "https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228"]
+]
+
+# --- Utilidades ---
+def plan_activo(usuario):
+    datos = usuarios.get(str(usuario.id), {})
+    if 'inicio_plan' in datos and 'duracion' in datos:
+        vencimiento = datetime.fromisoformat(datos['inicio_plan']) + timedelta(days=datos['duracion'])
+        return datetime.now() < vencimiento
+    return False
+
+def registrar_usuario(usuario):
+    uid = str(usuario.id)
+    if uid not in usuarios:
+        usuarios[uid] = {
+            "nombre": usuario.first_name,
+            "interacciones": 0,
+            "inicio_plan": None,
+            "duracion": 0
+        }
+        guardar_usuarios(usuarios)
+
+def contar_interaccion(usuario):
+    uid = str(usuario.id)
+    if uid not in usuarios:
+        registrar_usuario(usuario)
+    if not plan_activo(usuario):
+        usuarios[uid]["interacciones"] += 1
+        guardar_usuarios(usuarios)
+
+    return usuarios[uid]["interacciones"]
+
+def notificar_admin(mensaje):
     try:
-        vencimiento = datetime.strptime(fila[0], "%Y-%m-%d")
-        return vencimiento >= datetime.now()
-    except:
-        return False
+        application.bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ ERROR: {mensaje}")
+    except Exception as e:
+        logger.error(f"No se pudo notificar al admin: {e}")
 
-# Dividir texto inteligentemente
-def dividir_mensaje(texto: str, limite=4095):
-    partes = []
-    while len(texto) > limite:
-        corte = texto.rfind("\n", 0, limite)
-        if corte == -1:
-            corte = limite
-        partes.append(texto[:corte].strip())
-        texto = texto[corte:].strip()
-    partes.append(texto)
-    return partes
+# --- ChatGPT ---
+async def responder_con_chatgpt(mensaje_usuario):
+    try:
+        respuesta = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Actuá como un terapeuta empático, claro y conciso. Tu rol es acompañar emocionalmente con sensibilidad."},
+                {"role": "user", "content": mensaje_usuario}
+            ]
+        )
+        return respuesta.choices[0].message.content.strip()
+    except Exception as e:
+        notificar_admin(f"Fallo al generar respuesta IA: {e}")
+        return "Ocurrió un error al procesar tu mensaje. Intentalo nuevamente en unos minutos."
 
-# Registro o actualización
-def registrar_usuario(user_id: int, nombre: str):
-    hoy = datetime.now()
-    vencimiento = hoy + timedelta(days=7)
-    cursor.execute("REPLACE INTO usuarios (user_id, nombre, fecha_inicio, fecha_vencimiento) VALUES (?, ?, ?, ?)",
-                   (user_id, nombre, hoy.strftime("%Y-%m-%d"), vencimiento.strftime("%Y-%m-%d")))
-    conn.commit()
-
-# Comando /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    registrar_usuario(user.id, user.first_name)
-    mensaje = f"Hola {user.first_name}! 👋\nSoy tu terapeuta IA. Podés escribirme cuando quieras.\nUsá /ayuda para ver opciones disponibles."
+# --- Funciones principales ---
+async def saludo_personalizado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nombre = update.effective_user.first_name or "Hola"
+    mensaje = (
+        f"👋 ¡Hola, {nombre}! Estoy acá para acompañarte.\n\n"
+        "Podés contarme cómo te sentís, qué te preocupa o en qué querés trabajar hoy.\n"
+        "No hay respuestas incorrectas.\n\nEstoy para escucharte."
+    )
     await update.message.reply_text(mensaje)
 
-# Comando /ayuda
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Comandos disponibles:\n/start – Iniciar\n/planes – Ver planes\n/ejercicios – Ver ejercicios\n/resumen – Solicitar resumen")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await saludo_personalizado(update, context)
 
-# Comando /planes
-async def mostrar_planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    botones = [
-        [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
-        [InlineKeyboardButton("📆 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
-        [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
-        [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
-        [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
-        [InlineKeyboardButton("📅 Plan Anual – $99.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
-    ]
-    await update.message.reply_text("Seleccioná un plan para continuar:", reply_markup=InlineKeyboardMarkup(botones))
+async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    botones = [[InlineKeyboardButton(titulo, url=url)] for titulo, url in URL_PLANES]
+    await update.message.reply_text("Elegí un plan para continuar usando el bot:", reply_markup=InlineKeyboardMarkup(botones))
 
-# Comando /ejercicios
 async def ejercicios(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = (
-        "🧘‍♀️ Ejercicio sugerido:\n"
-        "Claro, aquí tienes un ejercicio breve y relajante que puedes intentar si te sientes en un estado neutral:\n\n"
-        "Ejercicio de Respiración Consciente y Sensación Corporal\n\n"
-        "1. Encuentra un Lugar Tranquilo: Busca un lugar donde puedas sentarte o recostarte cómodamente sin interrupciones.\n\n"
-        "2. Cierra los Ojos: Cierra suavemente los ojos y enfoca tu atención en la respiración.\n\n"
-        "3. Respira Profundamente: Inhala por la nariz contando hasta cuatro, sostén el aire, exhala por la boca contando hasta seis.\n\n"
-        "4. Escaneo Corporal: Lleva tu atención de los pies a la cabeza, observando cada parte del cuerpo sin juzgar."
+        "Ejercicio sugerido:\n\n"
+        "Ejercicio de Escaneo Corporal y Respiración:\n\n"
+        "1. Encuentra un Lugar Tranquilo: Busca un lugar donde puedas sentarte o recostarte sin interrupciones.\n\n"
+        "2. Cierra los Ojos: Lleva tu atención hacia adentro.\n\n"
+        "3. Respira Profundamente: Inhala por la nariz contando hasta 4, retén, y exhala por la boca contando hasta 6.\n\n"
+        "4. Escaneo Corporal: Dirige tu atención desde los pies hasta la cabeza, observando sensaciones."
     )
-    partes = dividir_mensaje(texto)
+    partes = texto.split("\n\n")
     for parte in partes:
-        await update.message.reply_text(parte)
+        if parte.strip():
+            await update.message.reply_text(parte.strip())
 
-# Comando /resumen
-async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"{update.effective_user.first_name}, aún no hay resumen disponible en esta versión. ¡Pronto estará habilitado!")
-
-# Middleware de control de acceso y errores
-async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_id = update.effective_user.id
-        if not tiene_acceso(user_id):
-            await mostrar_planes(update, context)
-            return
-        pregunta = update.message.text
-        respuesta = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": "Brindá respuestas empáticas, claras y concisas."},
-                      {"role": "user", "content": pregunta}]
-        )
-        texto = respuesta.choices[0].message.content
-        partes = dividir_mensaje(texto)
-        for parte in partes:
-            await update.message.reply_text(parte)
+        usuario = update.effective_user
+        registrar_usuario(usuario)
+
+        if plan_activo(usuario):
+            texto_usuario = update.message.text.strip()
+            respuesta = await responder_con_chatgpt(texto_usuario)
+            await update.message.reply_text(respuesta)
+        else:
+            interacciones = contar_interaccion(usuario)
+            if interacciones <= 5:
+                texto_usuario = update.message.text.strip()
+                respuesta = await responder_con_chatgpt(texto_usuario)
+                await update.message.reply_text(respuesta)
+            else:
+                await planes(update, context)
+
     except Exception as e:
-        logging.error(f"Error grave: {e}")
-        if ADMIN_CHAT_ID:
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"🚨 Error grave en el bot: {e}")
+        notificar_admin(f"Error en mensaje(): {e}")
+        await update.message.reply_text("Ocurrió un error. Intentalo nuevamente más tarde.")
 
-# Configuración del bot
+# --- Lanzar bot ---
 if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ayuda", ayuda))
-    app.add_handler(CommandHandler("planes", mostrar_planes))
-    app.add_handler(CommandHandler("ejercicios", ejercicios))
-    app.add_handler(CommandHandler("resumen", resumen))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("planes", planes))
+    application.add_handler(CommandHandler("ejercicios", ejercicios))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensaje))
 
-    print("🤖 Bot iniciado y esperando mensajes...")
-    app.run_polling()
+    logger.info("🤖 Bot iniciado y esperando mensajes...")
+    application.run_polling()
