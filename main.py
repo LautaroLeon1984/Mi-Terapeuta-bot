@@ -56,7 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     saludo = f"\U0001F44B Hola {user_name}! Estoy acá para acompañarte.\n\n" \
              "Podés contarme cómo te sentís, qué te preocupa o en qué querés trabajar hoy.\n" \
              "No hay respuestas incorrectas.\n\n" \
-             "... Solo escribí lo que quieras compartir. Si sos una pareja, pueden hablar juntos también.\n\n" \
+             "... Solo escribí lo que quieras compartir. Si estas con tu pareja, pueden hablar juntos también.\n\n" \
              "Estoy para escucharte."
     await context.bot.send_message(chat_id=user_id, text=saludo)
 
