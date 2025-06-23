@@ -162,4 +162,4 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensaje))
 
     logger.info("🤖 Bot iniciado y esperando mensajes...")
-    application.run_polling()}
+    application.run_polling()
