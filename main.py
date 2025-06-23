@@ -5,26 +5,26 @@ import time
 import datetime
 import openai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackContext
+from ejercicio import generar_ejercicio_por_estado
 
-# Configuración
+# Configuración básica
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = 818432829
 openai.api_key = OPENAI_API_KEY
 
-# Estados
-usuarios = {}  # {user_id: {"inicio": timestamp, "vencimiento": timestamp, "interacciones": int}}
+# Base de usuarios
+usuarios = {}
 respuestas_anteriores = {}
 ULTIMO_MENSAJE = {}
 MAX_GRATIS = 5
 TIEMPO_INACTIVIDAD = 600
 
-# Logging
+# Configuración de logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Utilidades
 async def notificar_admin(mensaje):
     try:
         if ADMIN_ID:
@@ -32,9 +32,11 @@ async def notificar_admin(mensaje):
     except Exception as e:
         logger.error(f"Error al notificar al admin: {e}")
 
+# Utilidades
+
 def dividir_mensaje_por_puntos(texto, limite=4095):
     partes = []
-    secciones = re.split(r'(?<=\n)(?=\d+\.\s)', texto)
+    secciones = re.split(r'(?<=\n)(?=\d+\.\s)', texto)  # separa por puntos enumerados
     mensaje_actual = ""
     for seccion in secciones:
         if len(mensaje_actual + seccion) <= limite:
@@ -49,19 +51,8 @@ def dividir_mensaje_por_puntos(texto, limite=4095):
 def limpiar_formato(texto):
     return re.sub(r'[\*`_]', '', texto)
 
-def tiene_acceso(user_id):
-    datos = usuarios.get(user_id, {})
-    ahora = time.time()
-    if "vencimiento" in datos:
-        return ahora < datos["vencimiento"]
-    return datos.get("interacciones", 0) < MAX_GRATIS
+# Comandos y Handlers
 
-def registrar_usuario(user_id):
-    ahora = time.time()
-    if user_id not in usuarios:
-        usuarios[user_id] = {"inicio": ahora, "interacciones": 0}
-
-# Comandos
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name or "!"
     await update.message.reply_text(
@@ -74,27 +65,16 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def ejercicios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    estado_animo = respuestas_anteriores.get(user_id, {}).get("emocion", "neutral")
     try:
-        user_id = update.effective_user.id
-        estado = "neutro"  # Esto luego será reemplazado con detección real
-
-        mensaje_sistema = "Sos un terapeuta profesional. Generá un ejercicio guiado para una persona que se siente {}. Sé claro, concreto y empático. Evitá títulos innecesarios."
-        respuesta = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": mensaje_sistema.format(estado)},
-                {"role": "user", "content": "Dame un ejercicio guiado para hoy."}
-            ]
-        ).choices[0].message.content
-
-        respuesta = limpiar_formato(respuesta)
+        respuesta = await generar_ejercicio_por_estado(estado_animo)
         partes = dividir_mensaje_por_puntos(respuesta)
         for parte in partes:
             await update.message.reply_text(parte)
-
     except Exception as e:
-        await notificar_admin(f"Error en /ejercicios: {str(e)}")
-        await update.message.reply_text("Hubo un error al generar el ejercicio. Intentá más tarde.")
+        await notificar_admin(f"Error al generar ejercicio: {str(e)}")
+        await update.message.reply_text("Ocurrió un error al generar el ejercicio. Intentalo más tarde.")
 
 async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     botones = [
@@ -110,16 +90,18 @@ async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(botones)
     )
 
-# Mensaje libre
+# Main Handler
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         mensaje = update.message.text
         ahora = time.time()
-        registrar_usuario(user_id)
         ULTIMO_MENSAJE[user_id] = ahora
 
-        if not tiene_acceso(user_id):
+        if user_id not in usuarios:
+            usuarios[user_id] = {"inicio": ahora, "interacciones": 0}
+
+        if usuarios[user_id]["interacciones"] >= MAX_GRATIS:
             await planes(update, context)
             return
 
@@ -127,6 +109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         respuesta = await consulta_a_openai(mensaje)
         respuesta = limpiar_formato(respuesta)
+
         partes = dividir_mensaje_por_puntos(respuesta)
         for parte in partes:
             await update.message.reply_text(parte)
@@ -145,7 +128,7 @@ async def consulta_a_openai(texto):
     )
     return respuesta.choices[0].message.content
 
-# Lanzador
+# Lanzador del bot
 if __name__ == '__main__':
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
