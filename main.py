@@ -2,30 +2,29 @@ import logging
 import os
 import re
 import time
-import datetime
 import openai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackContext
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from ejercicio import generar_ejercicio_por_estado
 
-# Configuración básica
+# Claves y configuración
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = 818432829
 openai.api_key = OPENAI_API_KEY
 
-# Base de usuarios
+# Logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Estados del bot
 usuarios = {}
-respuestas_anteriores = {}
+historial = {}
 ULTIMO_MENSAJE = {}
 MAX_GRATIS = 5
 TIEMPO_INACTIVIDAD = 600
-base_planes = {}  # user_id: {"inicio": timestamp, "dias": int}
 
-# Configuración de logs
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
+# ✉️ Notificación al admin
 async def notificar_admin(mensaje):
     try:
         if ADMIN_ID:
@@ -33,7 +32,9 @@ async def notificar_admin(mensaje):
     except Exception as e:
         logger.error(f"Error al notificar al admin: {e}")
 
-# Utilidades
+# 🔧 Utilidades
+def limpiar_formato(texto):
+    return re.sub(r'[\*`_]', '', texto)
 
 def dividir_mensaje_por_puntos(texto, limite=4095):
     partes = []
@@ -49,100 +50,94 @@ def dividir_mensaje_por_puntos(texto, limite=4095):
         partes.append(mensaje_actual.strip())
     return partes
 
-def limpiar_formato(texto):
-    return re.sub(r'[\*`_]', '', texto)
-
-# Comandos y Handlers
-
+# 👋 Comandos
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nombre = update.effective_user.first_name or "!"
+    nombre = update.effective_user.first_name or "👤"
     await update.message.reply_text(
-        f"Hola {nombre} 👋 Soy tu terapeuta IA. Podés hablar libremente conmigo las 24hs.\nSi necesitás ayuda, usá /ayuda."
+        f"Hola {nombre} 👋 Soy tu terapeuta IA. Podés hablar libremente conmigo las 24hs.\nUsá /ayuda para ver opciones."
     )
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/start – Saludo inicial.\n/ayuda – Mostrar este mensaje.\n/ejercicios – Ejercicio guiado.\n/planes – Ver planes de suscripción."
+        "/start – Iniciar conversación\n"
+        "/ayuda – Mostrar este menú\n"
+        "/ejercicio – Recibir un ejercicio guiado\n"
+        "/planes – Ver planes de suscripción"
+    )
+
+async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    botones = [
+        [InlineKeyboardButton("Plan Semanal", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
+        [InlineKeyboardButton("Plan Mensual", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
+        [InlineKeyboardButton("Plan Anual", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
+    ]
+    await update.message.reply_text(
+        "Tu acceso gratuito ha finalizado o estás consultando planes. Seleccioná uno para continuar:",
+        reply_markup=InlineKeyboardMarkup(botones)
     )
 
 async def ejercicios(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    estado_animo = respuestas_anteriores.get(user_id, {}).get("emocion", "neutral")
+    emocion = usuarios.get(user_id, {}).get("ultima_emocion", "neutral")
     try:
-        respuesta = await generar_ejercicio_por_estado(estado_animo)
-        for parte in respuesta:
+        partes = await generar_ejercicio_por_estado(emocion)
+        for parte in partes:
             await update.message.reply_text(parte)
     except Exception as e:
         await notificar_admin(f"Error al generar ejercicio: {str(e)}")
         await update.message.reply_text("Ocurrió un error al generar el ejercicio. Intentalo más tarde.")
 
-async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    botones = [
-        [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
-        [InlineKeyboardButton("🗖 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
-        [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
-        [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
-        [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
-        [InlineKeyboardButton("📅 Plan Anual – $99.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
-    ]
-    await update.message.reply_text(
-        "🚫 Tu acceso gratuito ha finalizado o estás consultando planes. Seleccioná uno para seguir usando el bot:",
-        reply_markup=InlineKeyboardMarkup(botones)
+# 🧠 GPT + CONTEXTO
+async def consulta_a_openai(user_id, mensaje):
+    historial.setdefault(user_id, [])
+    historial[user_id].append({"role": "user", "content": mensaje})
+    
+    prompt = [{"role": "system", "content": "Sos un terapeuta empático que acompaña emocionalmente con claridad."}]
+    prompt.extend(historial[user_id][-10:])  # último tramo de contexto
+
+    respuesta = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=prompt
     )
 
-# Main Handler
+    texto = respuesta.choices[0].message.content
+    historial[user_id].append({"role": "assistant", "content": texto})
+    return texto
+
+# 📩 Mensajes de texto
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         mensaje = update.message.text
         ahora = time.time()
 
-        if user_id in ULTIMO_MENSAJE:
-            if ahora - ULTIMO_MENSAJE[user_id] > TIEMPO_INACTIVIDAD:
-                await update.message.reply_text("⏳ Pasaron más de 10 minutos desde tu último mensaje. ¿Querés continuar o te paso un resumen?")
-                return
-
-        ULTIMO_MENSAJE[user_id] = ahora
-
         if user_id not in usuarios:
-            usuarios[user_id] = {"inicio": ahora, "interacciones": 0}
+            usuarios[user_id] = {"inicio": ahora, "interacciones": 0, "ultima_emocion": "neutral"}
 
-        suscripcion = base_planes.get(user_id)
-        if not suscripcion or time.time() > suscripcion["inicio"] + suscripcion["dias"] * 86400:
-            if usuarios[user_id]["interacciones"] >= MAX_GRATIS:
-                await planes(update, context)
-                return
+        if usuarios[user_id]["interacciones"] >= MAX_GRATIS:
+            await planes(update, context)
+            return
 
         usuarios[user_id]["interacciones"] += 1
+        ULTIMO_MENSAJE[user_id] = ahora
 
-        if user_id not in respuestas_anteriores:
-            respuestas_anteriores[user_id] = {"historial": [], "emocion": "neutral"}
+        respuesta = await consulta_a_openai(user_id, mensaje)
+        respuesta = limpiar_formato(respuesta)
 
-        respuestas_anteriores[user_id]["historial"].append({"role": "user", "content": mensaje})
-
-        historial = respuestas_anteriores[user_id]["historial"][-10:]
-        respuesta = await openai.ChatCompletion.acreate(
-            model="gpt-4",
-            messages=[{"role": "system", "content": "Sos un terapeuta empático que mantiene la coherencia del diálogo."}] + historial
-        )
-
-        texto_respuesta = limpiar_formato(respuesta.choices[0].message.content)
-        respuestas_anteriores[user_id]["historial"].append({"role": "assistant", "content": texto_respuesta})
-
-        partes = dividir_mensaje_por_puntos(texto_respuesta)
+        partes = dividir_mensaje_por_puntos(respuesta)
         for parte in partes:
             await update.message.reply_text(parte)
 
     except Exception as e:
-        await notificar_admin(f"Error en handle_message: {str(e)}")
-        await update.message.reply_text("Ocurrió un error. Por favor, intentá más tarde.")
+        await notificar_admin(f"Error en mensaje: {str(e)}")
+        await update.message.reply_text("Ocurrió un error. Intentalo nuevamente en unos minutos.")
 
-# Lanzador del bot
+# 🚀 Lanzador
 if __name__ == '__main__':
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ayuda", ayuda))
-    app.add_handler(CommandHandler("ejercicios", ejercicios))
+    app.add_handler(CommandHandler("ejercicio", ejercicios))
     app.add_handler(CommandHandler("planes", planes))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
