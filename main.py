@@ -1,41 +1,34 @@
 import logging
 import os
-import openai
+import json
 import asyncio
-import sqlite3
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
-from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters, CallbackQueryHandler
+    ContextTypes, filters
 )
+import openai
 
-# --- Configuración inicial ---
+# --- Configuración de claves y API ---
 openai.api_key = os.getenv("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DB_FILE = "usuarios.db"
+ARCHIVO_USUARIOS = "usuarios.json"
 
-# --- Configuración de logs ---
+# --- Configuración del log ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# --- Inicializar BD ---
-def init_db():
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            user_id INTEGER PRIMARY KEY,
-            nombre TEXT,
-            interacciones INTEGER,
-            plan TEXT,
-            inicio_plan TEXT,
-            fin_plan TEXT,
-            ultima_interaccion TEXT
-        )""")
+# --- Carga de base de datos de usuarios ---
+if not os.path.exists(ARCHIVO_USUARIOS):
+    with open(ARCHIVO_USUARIOS, "w") as f:
+        json.dump({}, f)
 
-# --- Servidor Flask ---
+with open(ARCHIVO_USUARIOS, "r") as f:
+    usuarios = json.load(f)
+
+# --- Servidor Flask para mantener activo Railway ---
 app = Flask(__name__)
 
 @app.route("/")
@@ -45,117 +38,99 @@ def home():
 def keep_alive():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
 
-# --- Utilidades de usuario ---
-def obtener_usuario(user_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.execute("SELECT * FROM usuarios WHERE user_id = ?", (user_id,))
-        return cursor.fetchone()
+# --- Función para guardar usuarios ---
+def guardar_datos():
+    with open(ARCHIVO_USUARIOS, "w") as f:
+        json.dump(usuarios, f, indent=2)
 
-def crear_o_actualizar_usuario(user):
-    with sqlite3.connect(DB_FILE) as conn:
-        existente = obtener_usuario(user.id)
-        if not existente:
-            conn.execute("""
-                INSERT INTO usuarios (user_id, nombre, interacciones, plan, inicio_plan, fin_plan, ultima_interaccion)
-                VALUES (?, ?, 0, 'free', NULL, NULL, ?)
-            """, (user.id, user.first_name, datetime.utcnow().isoformat()))
+# --- Mostrar planes ---
+async def mostrar_planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    botones = [
+        [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
+        [InlineKeyboardButton("📆 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
+        [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
+        [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
+        [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
+        [InlineKeyboardButton("📅 Plan Anual – $99.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
+    ]
+    await update.message.reply_text("🚫 Tu acceso gratuito ha finalizado.\nSeleccioná uno de los planes para seguir usando el bot:", reply_markup=InlineKeyboardMarkup(botones))
 
-# --- Comandos y lógica ---
+# --- Comando /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    crear_o_actualizar_usuario(update.effective_user)
-    mensaje = (
-        f"Hola {update.effective_user.first_name} 👋\n\n"
-        "Soy tu terapeuta IA. Funciono 24/7 para ayudarte emocionalmente de forma accesible y confidencial.\n\n"
-        "👉 Tienes 5 consultas gratuitas. Luego podrás elegir un plan.\n"
-        "👉 Escribime cuando quieras para empezar.\n\n"
-        "💬 /ayuda para conocer más sobre cómo funciona."
-    )
-    await update.message.reply_text(mensaje)
-
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in usuarios:
+        usuarios[user_id] = {
+            "interacciones": 0,
+            "inicio_plan": None,
+            "fin_plan": None,
+            "ultimo_mensaje": None
+        }
+        guardar_datos()
     await update.message.reply_text(
-        "Este bot funciona como terapeuta IA para ayudarte emocionalmente.\n"
-        "Puedes escribir lo que sientas y recibirás una respuesta empática, clara y guiada.\n\n"
-        "- 5 primeras consultas gratuitas.\n"
-        "- Luego puedes suscribirte con MercadoPago.\n"
-        "- /estado para ver tu plan y vencimiento.\n"
-        "- /resumen para guardar tu conversación (cuando se active)."
+        "Hola 👋 Soy tu terapeuta IA. Estoy disponible 24/7 para escucharte y acompañarte emocionalmente.\n\nTenés 5 mensajes gratuitos. Luego podés elegir un plan para continuar.\n\nEscribí lo que necesites, estoy acá para ayudarte."
     )
 
-async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    u = obtener_usuario(user_id)
-    if u:
-        plan, inicio, fin = u[3], u[4], u[5]
-        if plan == "free":
-            msg = "🆓 Estás en el plan gratuito. Te quedan 5 consultas."
-        else:
-            msg = f"✅ Plan activo: {plan}\nDesde: {inicio}\nHasta: {fin}"
-        await update.message.reply_text(msg)
-    else:
-        await update.message.reply_text("Usuario no registrado. Escribí /start para comenzar.")
+# --- Respuesta por IA con control de acceso ---
+async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    mensaje = update.message.text
+    ahora = datetime.now()
 
-async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    crear_o_actualizar_usuario(update.effective_user)
-    u = obtener_usuario(user_id)
+    if user_id not in usuarios:
+        return await start(update, context)
 
-    interacciones, plan, fin_plan = u[2], u[3], u[5]
-    ahora = datetime.utcnow()
-    puede_continuar = False
+    usuario = usuarios[user_id]
 
-    if plan == "free" and interacciones < 5:
-        puede_continuar = True
-    elif plan != "free" and fin_plan and datetime.fromisoformat(fin_plan) > ahora:
-        puede_continuar = True
+    # Verificar si tiene plan activo
+    if usuario["fin_plan"]:
+        fin = datetime.fromisoformat(usuario["fin_plan"])
+        if ahora > fin:
+            usuario["fin_plan"] = None
+            usuario["inicio_plan"] = None
 
-    if puede_continuar:
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": update.message.text}],
-            )
-            reply = response.choices[0].message.content
-            await update.message.reply_text(reply)
-            with sqlite3.connect(DB_FILE) as conn:
-                conn.execute(
-                    "UPDATE usuarios SET interacciones = interacciones + 1, ultima_interaccion = ? WHERE user_id = ?",
-                    (ahora.isoformat(), user_id)
-                )
+    if not usuario["fin_plan"] and usuario["interacciones"] >= 5:
+        return await mostrar_planes(update, context)
 
-        except Exception as e:
-            logger.error(f"Error al procesar mensaje: {e}")
-            await update.message.reply_text("⚠️ Ocurrió un error al procesar tu mensaje.")
-    else:
-        await update.message.reply_text(
-            "🛑 Has alcanzado el límite de uso gratuito o tu plan ha expirado.\n"
-            "Por favor, suscribite para continuar."
+    # Procesar respuesta por OpenAI
+    try:
+        respuesta = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Sos un terapeuta virtual empático. Brindá respuestas claras, concisas y con sensibilidad emocional."},
+                {"role": "user", "content": mensaje}
+            ]
         )
+        reply = respuesta.choices[0].message.content
+        await update.message.reply_text(reply)
+    except Exception as e:
+        logging.error(f"Error IA: {e}")
+        await update.message.reply_text("⚠️ Ocurrió un error al procesar tu mensaje.")
+        return
 
-# --- Inactividad (simulada por verificación manual) ---
-async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔄 ¿Querés continuar la conversación o generar un resumen para retomarla luego?\n\n"
-        "(Esta función está en desarrollo)"
-    )
+    # Actualizar datos
+    usuario["interacciones"] += 1
+    usuario["ultimo_mensaje"] = ahora.isoformat()
+    guardar_datos()
 
-# --- Inicialización ---
+    # Verificar inactividad
+    if usuario.get("ultimo_mensaje"):
+        anterior = datetime.fromisoformat(usuario["ultimo_mensaje"])
+        if ahora - anterior > timedelta(minutes=10):
+            await update.message.reply_text("¿Querés seguir conversando o preferís un resumen para retomarlo más tarde?")
+
+# --- Inicio del bot ---
 if __name__ == "__main__":
-    init_db()
     keep_alive()
-    
+
     app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
+
     async def setup():
         await app_bot.bot.delete_webhook(drop_pending_updates=True)
 
     app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("ayuda", ayuda))
-    app_bot.add_handler(CommandHandler("estado", estado))
-    app_bot.add_handler(CommandHandler("resumen", resumen))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
     app_bot.post_init = setup
 
-    print("🤖 Bot terapeuta IA funcionando desde Railway...")
+    print("🤖 Bot terapeuta IA iniciado y esperando mensajes...")
     app_bot.run_polling()
