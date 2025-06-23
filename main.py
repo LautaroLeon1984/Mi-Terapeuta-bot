@@ -20,6 +20,7 @@ respuestas_anteriores = {}
 ULTIMO_MENSAJE = {}
 MAX_GRATIS = 5
 TIEMPO_INACTIVIDAD = 600
+base_planes = {}  # user_id: {"inicio": timestamp, "dias": int}
 
 # Configuración de logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -36,7 +37,7 @@ async def notificar_admin(mensaje):
 
 def dividir_mensaje_por_puntos(texto, limite=4095):
     partes = []
-    secciones = re.split(r'(?<=\n)(?=\d+\.\s)', texto)  # separa por puntos enumerados
+    secciones = re.split(r'(?<=\n)(?=\d+\.\s)', texto)
     mensaje_actual = ""
     for seccion in secciones:
         if len(mensaje_actual + seccion) <= limite:
@@ -69,8 +70,7 @@ async def ejercicios(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado_animo = respuestas_anteriores.get(user_id, {}).get("emocion", "neutral")
     try:
         respuesta = await generar_ejercicio_por_estado(estado_animo)
-        partes = dividir_mensaje_por_puntos(respuesta)
-        for parte in partes:
+        for parte in respuesta:
             await update.message.reply_text(parte)
     except Exception as e:
         await notificar_admin(f"Error al generar ejercicio: {str(e)}")
@@ -79,7 +79,7 @@ async def ejercicios(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     botones = [
         [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
-        [InlineKeyboardButton("📆 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
+        [InlineKeyboardButton("🗖 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
         [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
         [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
         [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
@@ -96,37 +96,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         mensaje = update.message.text
         ahora = time.time()
+
+        if user_id in ULTIMO_MENSAJE:
+            if ahora - ULTIMO_MENSAJE[user_id] > TIEMPO_INACTIVIDAD:
+                await update.message.reply_text("⏳ Pasaron más de 10 minutos desde tu último mensaje. ¿Querés continuar o te paso un resumen?")
+                return
+
         ULTIMO_MENSAJE[user_id] = ahora
 
         if user_id not in usuarios:
             usuarios[user_id] = {"inicio": ahora, "interacciones": 0}
 
-        if usuarios[user_id]["interacciones"] >= MAX_GRATIS:
-            await planes(update, context)
-            return
+        suscripcion = base_planes.get(user_id)
+        if not suscripcion or time.time() > suscripcion["inicio"] + suscripcion["dias"] * 86400:
+            if usuarios[user_id]["interacciones"] >= MAX_GRATIS:
+                await planes(update, context)
+                return
 
         usuarios[user_id]["interacciones"] += 1
 
-        respuesta = await consulta_a_openai(mensaje)
-        respuesta = limpiar_formato(respuesta)
+        if user_id not in respuestas_anteriores:
+            respuestas_anteriores[user_id] = {"historial": [], "emocion": "neutral"}
 
-        partes = dividir_mensaje_por_puntos(respuesta)
+        respuestas_anteriores[user_id]["historial"].append({"role": "user", "content": mensaje})
+
+        historial = respuestas_anteriores[user_id]["historial"][-10:]
+        respuesta = await openai.ChatCompletion.acreate(
+            model="gpt-4",
+            messages=[{"role": "system", "content": "Sos un terapeuta empático que mantiene la coherencia del diálogo."}] + historial
+        )
+
+        texto_respuesta = limpiar_formato(respuesta.choices[0].message.content)
+        respuestas_anteriores[user_id]["historial"].append({"role": "assistant", "content": texto_respuesta})
+
+        partes = dividir_mensaje_por_puntos(texto_respuesta)
         for parte in partes:
             await update.message.reply_text(parte)
 
     except Exception as e:
         await notificar_admin(f"Error en handle_message: {str(e)}")
         await update.message.reply_text("Ocurrió un error. Por favor, intentá más tarde.")
-
-async def consulta_a_openai(texto):
-    respuesta = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "Sos un terapeuta que responde con empatía, claridad y concisión."},
-            {"role": "user", "content": texto},
-        ]
-    )
-    return respuesta.choices[0].message.content
 
 # Lanzador del bot
 if __name__ == '__main__':
