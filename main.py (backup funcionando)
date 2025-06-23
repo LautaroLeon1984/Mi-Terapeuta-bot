@@ -1,188 +1,178 @@
 import os
-import json
 import logging
 import asyncio
-import datetime
+import openai
+import json
+import sqlite3
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
-)
-from openai import OpenAI, OpenAIError
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, filters,
+                          ContextTypes, CallbackQueryHandler)
 
-# --- Configuración de logging ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-
-# --- Cargar claves de entorno ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# --- Configuración ---
+openai.api_key = os.getenv("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "00000000"))  # Reemplazar por tu ID real
+DB_PATH = "usuarios.db"
 
-# --- Cliente OpenAI ---
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# --- Logging ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- Base de datos local (usuarios) ---
-USER_DB = "usuarios.json"
-
-if not os.path.exists(USER_DB):
-    with open(USER_DB, 'w') as f:
-        json.dump({}, f)
-
-def cargar_usuarios():
-    with open(USER_DB, 'r') as f:
-        return json.load(f)
-
-def guardar_usuarios(data):
-    with open(USER_DB, 'w') as f:
-        json.dump(data, f, indent=2)
-
-# --- Servidor Flask para mantener Railway activo ---
+# --- Flask para mantener Railway activo ---
 app = Flask(__name__)
-@app.route("/")
+@app.route('/')
 def home():
-    return "Bot activo desde Railway ✅", 200
+    return "Bot activo"
+Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 8080}).start()
 
-def keep_alive():
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
+# --- DB ---
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY,
+            username TEXT,
+            nombre TEXT,
+            fecha_inicio TEXT,
+            fecha_vencimiento TEXT,
+            interacciones_gratis INTEGER DEFAULT 0,
+            plan_activo INTEGER DEFAULT 0
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS actividad (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            mensaje TEXT,
+            respuesta TEXT,
+            fecha TEXT,
+            ia BOOLEAN
+        )''')
+init_db()
 
-# --- Mostrar planes ---
-async def mostrar_planes(update, context):
-    botones = [
-        [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
-        [InlineKeyboardButton("📆 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
-        [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
-        [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
-        [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
-        [InlineKeyboardButton("📅 Plan Anual – $99.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
-    ]
-    await update.message.reply_text("🚫 Tu acceso gratuito ha finalizado.\nSeleccioná uno de los planes para seguir usando el bot:",
-                                    reply_markup=InlineKeyboardMarkup(botones))
+# --- Funciones de ayuda ---
+def registrar_usuario(user):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM usuarios WHERE id=?", (user.id,))
+        if not c.fetchone():
+            inicio = datetime.now().strftime("%Y-%m-%d")
+            vencimiento = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            c.execute("INSERT INTO usuarios (id, username, nombre, fecha_inicio, fecha_vencimiento) VALUES (?, ?, ?, ?, ?)",
+                      (user.id, user.username, user.first_name, inicio, vencimiento))
 
-# --- Manejo de usuarios y planes ---
-def usuario_activo(user_id):
-    usuarios = cargar_usuarios()
-    if str(user_id) not in usuarios:
-        return False
-    datos = usuarios[str(user_id)]
-    if 'inicio' not in datos or 'fin' not in datos:
-        return False
-    hoy = datetime.datetime.now().date()
-    return datetime.datetime.strptime(datos['fin'], '%Y-%m-%d').date() >= hoy
-
-def registrar_usuario(user_id):
-    usuarios = cargar_usuarios()
-    if str(user_id) not in usuarios:
-        hoy = datetime.datetime.now().date()
-        usuarios[str(user_id)] = {
-            "inicio": str(hoy),
-            "fin": str(hoy + datetime.timedelta(days=7)),
-            "interacciones": 0
-        }
-        guardar_usuarios(usuarios)
-
-# --- Inicio /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    registrar_usuario(update.effective_user.id)
-    texto = (
-        "Hola, soy tu terapeuta IA 🌟\n\n"
-        "Estoy disponible 24/7 para escucharte, orientarte y acompañarte emocionalmente.\n"
-        "Tenés 5 consultas gratuitas para probar el servicio. Luego podés elegir un plan.\n\n"
-        "Usá /ayuda para ver más comandos disponibles."
-    )
-    await update.message.reply_text(texto)
-
-# --- Ayuda ---
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Comandos disponibles:\n/start - Iniciar\n/ayuda - Ver comandos\n/estado - Ver estado del bot\n/ejercicios - Obtener ejercicio de relajación")
-
-# --- Estado ---
-async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot funcionando correctamente desde Railway 🚀")
-
-# --- Ejercicios (dividir correctamente) ---
-def dividir_mensaje(texto, max_len=4095):
-    partes = []
-    actual = ""
-    for linea in texto.split("\n"):
-        if len(actual) + len(linea) + 1 <= max_len:
-            actual += linea + "\n"
+async def enviar_grande(update, text):
+    partes = text.split('\n\n')
+    buffer = ""
+    for parte in partes:
+        if len(buffer) + len(parte) < 4095:
+            buffer += parte + "\n\n"
         else:
-            partes.append(actual.strip())
-            actual = linea + "\n"
-    if actual:
-        partes.append(actual.strip())
-    return partes
+            await update.message.reply_text(buffer.strip())
+            buffer = parte + "\n\n"
+    if buffer:
+        await update.message.reply_text(buffer.strip())
+
+# --- Comandos ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    registrar_usuario(update.effective_user)
+    await update.message.reply_text(
+        f"Hola {update.effective_user.first_name}! Bienvenido a Mi Terapeuta IA.\n"
+        "Podés consultar libremente. Luego de 5 interacciones, deberás suscribirte.\n"
+        "Comandos útiles: /ayuda /planes"
+    )
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Este bot te acompaña emocionalmente mediante IA.\n"
+        "Puedes interactuar libremente. Si necesitas ayuda, envíame un mensaje."
+    )
+
+async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Planes disponibles:\n\n"
+        "📅 Semanal: $2.000\n"
+        "📅 Mensual: $6.000\n"
+        "📅 Anual: $49.000\n\n"
+        "Solicitá tu plan para seguir usando el bot sin límites."
+    )
 
 async def ejercicios(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = (
         "🧘‍♀️ Ejercicio sugerido:\n"
-        "Claro, aquí tienes un ejercicio breve y relajante que puede ayudar a reconectar con tus emociones:\n\n"
-        "Ejercicio de Escaneo Corporal y Respiración Consciente\n\n"
-        "1. Encuentra un Lugar Tranquilo: Siéntate o acéstate en un lugar cómodo donde no te molesten.\n\n"
-        "2. Cierra los Ojos: Cierra los ojos suavemente y dirigí tu atención hacia adentro.\n\n"
-        "3. Respira Profundamente: Inhalá por la nariz contando hasta 4, sostené un momento y exhalá por la boca contando hasta 6. Repetí 3 veces.\n\n"
-        "4. Escaneo Corporal: Empezá por los pies y subí la atención lentamente hasta la cabeza, notando cada parte sin juzgar."
+        "Claro, aquí tienes un ejercicio breve y relajante que puedes intentar si te sientes neutral:\n\n"
+        "Ejercicio de Respiración Consciente y Sensación Corporal\n\n"
+        "1. Encuentra un Lugar Tranquilo: Busca un lugar donde puedas sentarte o recostarte cómodamente.\n\n"
+        "2. Cierra los Ojos: Cierra los ojos suavemente y lleva tu atención a tu respiración.\n\n"
+        "3. Respira Profundamente: Inhala por la nariz contando 4, sostené, y exhalá por la boca contando 6. Repetí 3 veces.\n\n"
+        "4. Escaneo Corporal: Llevá tu atención desde los pies hacia la cabeza, lentamente. Observá cada parte sin juzgar.\n\n"
+        "5. Cierre: Tomate unos segundos finales para agradecerte por el tiempo tomado."
     )
-    partes = dividir_mensaje(texto)
-    for parte in partes:
-        await update.message.reply_text(parte)
+    await enviar_grande(update, texto)
 
-# --- Procesar mensajes generales ---
+# --- Inactividad ---
+usuarios_ultima_interaccion = {}
+async def detectar_inactividad():
+    while True:
+        ahora = datetime.now()
+        for user_id, ultima in list(usuarios_ultima_interaccion.items()):
+            if (ahora - ultima).total_seconds() > 600:
+                app_bot = context_global.bot
+                await app_bot.send_message(chat_id=user_id,
+                    text="¿Querés que te prepare un resumen de lo que hablamos? Podés guardarlo o revisarlo más tarde.")
+                usuarios_ultima_interaccion[user_id] = ahora  # Evita spam
+        await asyncio.sleep(60)
+
+# --- Chat principal ---
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user = update.effective_user
+    registrar_usuario(user)
+    usuarios_ultima_interaccion[user.id] = datetime.now()
     mensaje = update.message.text
 
-    registrar_usuario(user_id)
-    usuarios = cargar_usuarios()
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT interacciones_gratis, plan_activo, fecha_vencimiento FROM usuarios WHERE id=?", (user.id,))
+        data = c.fetchone()
 
-    if not usuario_activo(user_id):
-        await mostrar_planes(update, context)
-        return
-
-    if mensaje.lower() in ["hola", "hi", "buenas"]:
-        return
-
-    if usuarios[str(user_id)]["interacciones"] >= 5:
-        await mostrar_planes(update, context)
-        return
+        if data:
+            interacciones, plan_activo, vencimiento = data
+            if plan_activo == 0 and interacciones >= 5:
+                await update.message.reply_text("Has superado el límite gratuito. Suscribite con /planes.")
+                return
 
     try:
-        respuesta = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Sé un terapeuta empático, claro y conciso."},
-                {"role": "user", "content": mensaje}
-            ]
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": mensaje}]
         )
-        texto = respuesta.choices[0].message.content.strip()
-        usuarios[str(user_id)]["interacciones"] += 1
-        guardar_usuarios(usuarios)
-        for parte in dividir_mensaje(texto):
-            await update.message.reply_text(parte)
-    except OpenAIError as e:
-        await update.message.reply_text("Ocurrió un error procesando tu mensaje. Intentalo más tarde.")
+        respuesta = response.choices[0].message['content']
+    except Exception as e:
         logging.error(f"Error OpenAI: {e}")
+        await update.message.reply_text("Hubo un error procesando tu mensaje.")
+        return
 
-# --- Ejecutar bot ---
+    await enviar_grande(update, respuesta)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO actividad (user_id, mensaje, respuesta, fecha, ia) VALUES (?, ?, ?, ?, ?)",
+                  (user.id, mensaje, respuesta, datetime.now().isoformat(), True))
+        if plan_activo == 0:
+            c.execute("UPDATE usuarios SET interacciones_gratis = interacciones_gratis + 1 WHERE id=?", (user.id,))
+
+# --- Main ---
 if __name__ == '__main__':
-    keep_alive()
-
     app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    context_global = app_bot
 
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("ayuda", ayuda))
-    app_bot.add_handler(CommandHandler("estado", estado))
+    app_bot.add_handler(CommandHandler("planes", planes))
     app_bot.add_handler(CommandHandler("ejercicios", ejercicios))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
+    app_bot.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), responder))
 
-    async def setup():
-        await app_bot.bot.delete_webhook(drop_pending_updates=True)
-
-    app_bot.post_init = setup
-
+    loop = asyncio.get_event_loop()
+    loop.create_task(detectar_inactividad())
     print("🤖 Bot iniciado y esperando mensajes...")
     app_bot.run_polling()
