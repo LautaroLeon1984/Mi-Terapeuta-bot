@@ -24,17 +24,17 @@ def dividir_mensaje_por_puntos(texto, limite=4095):
     return partes
 
 # Función principal: generar un ejercicio guiado personalizado
-def generar_ejercicio_por_estado(estado):
+async def generar_ejercicio_por_estado(estado):
     prompt = (
         f"Actuás como terapeuta. Sugiere un ejercicio guiado breve (respiración, relajación, atención plena, movimiento físico u otra técnica emocional) "
         f"para una persona que se siente '{estado}'. Debe ser claro, empático, fácil de hacer en casa, no invasivo. "
         f"Usa tono cálido y accesible, en español. Redactalo en 4 a 6 pasos simples con encabezado."
     )
 
-respuesta = await openai.ChatCompletion.acreate(  # 'acreate' es la versión async
+respuesta = await openai.ChatCompletion.acreate(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "Sos un terapeuta empático que sugiere ejercicios guiados con claridad y contención emocional."},
+            {"role": "system", "content": "Sos un terapeuta empático que sugiere ejercicios guiados."},
             {"role": "user", "content": prompt},
         ]
     )
