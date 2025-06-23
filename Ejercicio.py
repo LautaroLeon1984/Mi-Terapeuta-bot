@@ -31,7 +31,7 @@ def generar_ejercicio_por_estado(estado):
         f"Usa tono cálido y accesible, en español. Redactalo en 4 a 6 pasos simples con encabezado."
     )
 
-    respuesta = openai.ChatCompletion.create(
+respuesta = await openai.ChatCompletion.acreate(  # 'acreate' es la versión async
         model="gpt-4",
         messages=[
             {"role": "system", "content": "Sos un terapeuta empático que sugiere ejercicios guiados con claridad y contención emocional."},
