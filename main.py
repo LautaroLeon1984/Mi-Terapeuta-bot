@@ -1,142 +1,140 @@
-import logging
 import os
-import openai
-import asyncio
 import json
-from datetime import datetime, timedelta
+import logging
+import datetime
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
+                          filters, CallbackContext)
+from openai import AsyncOpenAI
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
 
-# --- Verificación de variables de entorno ---
+# Configuración de logs
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# Cargar claves de entorno
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-if not OPENAI_API_KEY or not TELEGRAM_BOT_TOKEN:
-    raise EnvironmentError("❌ ERROR: OPENAI_API_KEY o TELEGRAM_BOT_TOKEN no están definidas en las variables de entorno")
-
-# --- Configuración inicial ---
-openai.api_key = OPENAI_API_KEY
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-
-# --- Base de datos local ---
-DB_PATH = "usuarios.json"
-try:
-    with open(DB_PATH, "r") as f:
-        usuarios = json.load(f)
-except FileNotFoundError:
-    usuarios = {}
-
-# --- Servidor Flask ---
+# Inicializar clientes
+openai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Bot activo desde Railway ✅", 200
-
-def keep_alive():
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-
-# --- Planes de suscripción ---
-PLANES = [
-    [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
-    [InlineKeyboardButton("📆 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
-    [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
-    [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
-    [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
-    [InlineKeyboardButton("📅 Plan Anual – $99.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
-]
-
-# --- Funciones del bot ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    if uid not in usuarios:
-        usuarios[uid] = {
-            "inicio": str(datetime.now()),
-            "interacciones": 0,
-            "plan_activo": False
-        }
+# Base de datos
+DB_PATH = "db.json"
+def cargar_db():
+    if not os.path.exists(DB_PATH):
         with open(DB_PATH, "w") as f:
-            json.dump(usuarios, f)
+            json.dump({}, f)
+    with open(DB_PATH, "r") as f:
+        return json.load(f)
 
-    bienvenida = (
-        "Hola 👋 Soy tu terapeuta IA. Estoy disponible 24/7 para acompañarte con respuestas empáticas, claras y concisas.\n"
-        "🧠 Este servicio no reemplaza una terapia profesional.\n"
-        "⌛ Tenés 5 consultas gratuitas. Luego podés elegir un plan para continuar.\n"
-        "📋 Usá /ayuda si necesitás más información."
+def guardar_db(db):
+    with open(DB_PATH, "w") as f:
+        json.dump(db, f, indent=4)
+
+def dividir_texto(texto, max_len=4095):
+    oraciones = texto.split('. ')
+    partes = []
+    actual = ""
+    for o in oraciones:
+        if len(actual) + len(o) + 2 <= max_len:
+            actual += o + ". "
+        else:
+            partes.append(actual.strip())
+            actual = o + ". "
+    if actual:
+        partes.append(actual.strip())
+    return partes
+
+async def enviar_largo(update: Update, texto: str):
+    partes = dividir_texto(texto)
+    for parte in partes:
+        await update.message.reply_text(parte)
+
+# Manejo de comandos
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    db = cargar_db()
+
+    if user_id not in db:
+        db[user_id] = {"inicio": str(datetime.date.today()), "plan": "free", "usos": 0}
+        guardar_db(db)
+
+    mensaje = (
+        "👋 ¡Hola! Soy tu terapeuta virtual.
+"
+        "Podés contarme lo que te pasa, y te responderé con empatía, claridad y de forma concisa.
+"
+        "Las primeras 5 consultas son gratis.
+"
+        "Cuando se terminen, podés elegir un plan con /planes
+"
+        "Si necesitás ayuda, escribí /ayuda"
     )
-    await update.message.reply_text(bienvenida)
-
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Consultas 24/7 con IA empática. 5 mensajes gratis. Luego, seleccioná un plan. /planes")
+    await update.message.reply_text(mensaje)
 
 async def planes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📦 Elegí un plan para continuar usando el bot:", reply_markup=InlineKeyboardMarkup(PLANES))
+    botones = [
+        [InlineKeyboardButton("🗓️ Plan Semanal – $4.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=21746b5ae9c94be08c0b9abcb9484f0b")],
+        [InlineKeyboardButton("📆 Plan Quincenal – $7.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=32e17d17ce334234ac3d5577bfc3fea0")],
+        [InlineKeyboardButton("🗓️ Plan Mensual – $12.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=1a92e8b1e31d44b99188505cf835483d")],
+        [InlineKeyboardButton("📅 Plan Trimestral – $30.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=9a17a9ac63844309ab87119b56f6f71e")],
+        [InlineKeyboardButton("📅 Plan Semestral – $55.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=cff15077ebe84fb88ccd0e20afa29437")],
+        [InlineKeyboardButton("📅 Plan Anual – $99.000", url="https://www.mercadopago.com.ar/subscriptions/checkout?preapproval_plan_id=3f7b1e3b69d544f78c7d9862e1391228")],
+    ]
+    await update.message.reply_text(
+        "🚫 Tu acceso gratuito ha finalizado.\nSeleccioná uno de los planes para seguir usando el bot:",
+        reply_markup=InlineKeyboardMarkup(botones)
+    )
 
-# Detección de inactividad
-last_messages = {}
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = "Este bot está diseñado para ayudarte emocionalmente usando inteligencia artificial. \n"
+    texto += "Funciona las 24 hs, no reemplaza a un terapeuta humano. \n"
+    texto += "Podés usarlo escribiendo normalmente y te responderé."
+    await update.message.reply_text(texto)
 
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    now = datetime.now()
+    user_id = str(update.effective_user.id)
+    db = cargar_db()
 
-    # Inactividad
-    if uid in last_messages:
-        if now - last_messages[uid] > timedelta(minutes=10):
-            await update.message.reply_text("⏳ ¿Querés seguir conversando o preferís un resumen?")
-    last_messages[uid] = now
-
-    # Registro de usuario y conteo
-    if uid not in usuarios:
-        usuarios[uid] = {"inicio": str(now), "interacciones": 0, "plan_activo": False}
-
-    if not usuarios[uid]["plan_activo"] and usuarios[uid]["interacciones"] >= 5:
-        await update.message.reply_text(
-            "🚫 Tu acceso gratuito ha finalizado.",
-            reply_markup=InlineKeyboardMarkup(PLANES)
-        )
+    if user_id not in db:
+        await start(update, context)
         return
 
-    # Consulta a ChatGPT
+    if db[user_id]['plan'] == 'free' and db[user_id]['usos'] >= 5:
+        await planes(update, context)
+        return
+
+    consulta = update.message.text
+
     try:
-        prompt = update.message.text
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+        response = await openai.chat.completions.create(
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Sos un terapeuta empático, claro y conciso."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "Actuá como terapeuta empático, claro y conciso."},
+                {"role": "user", "content": consulta},
             ]
         )
-        reply = response.choices[0].message.content
-        await update.message.reply_text(reply)
-        usuarios[uid]["interacciones"] += 1
-        with open(DB_PATH, "w") as f:
-            json.dump(usuarios, f)
+        respuesta = response.choices[0].message.content
+        db[user_id]['usos'] += 1
+        guardar_db(db)
+        await enviar_largo(update, respuesta)
     except Exception as e:
-        logging.error(f"Error: {e}")
-        await update.message.reply_text("⚠️ Hubo un error al procesar tu mensaje.")
+        await update.message.reply_text("❌ Error al procesar la consulta. Intentalo más tarde.")
+        logging.error(f"Error con OpenAI: {e}")
 
-# --- Inicialización ---
-if __name__ == "__main__":
-    keep_alive()
-    app_bot = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+# Servidor Flask para mantener vivo
+@app.route('/')
+def home():
+    return "Bot activo."
 
-    async def setup():
-        await app_bot.bot.delete_webhook(drop_pending_updates=True)
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
 
-    app_bot.post_init = setup
+# Ejecutar bot
+if __name__ == '__main__':
+    Thread(target=run_flask).start()
 
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("ayuda", ayuda))
-    app_bot.add_handler(CommandHandler("planes", planes))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-
-    print("🤖 Bot iniciado y esperando mensajes...")
-    app_bot.run_polling()
+    app_teleg
